@@ -2,44 +2,84 @@ use std::env;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::PathBuf;
+
+struct Arguments {
+    slf_path: String,
+    out_path: Option<PathBuf>,
+    rom_file: Option<File>,
+    cdl_file: Option<File>,
+}
+
+impl Arguments {
+    pub fn new(slf_path: String) -> Self {
+        Self {
+            slf_path,
+            out_path: None,
+            rom_file: None,
+            cdl_file: None,
+        }
+    }
+}
 
 fn main() {
     println!("ROM breakdown | ZReC - 2022\n");
 
-    if let Some(out_path) = env::args().collect::<Vec<String>>().get(1) {
-        let mut rom_file = match File::open(out_path) {
-            Ok(f) => f,
-            Err(e) => return println!("\nError: {}", e),
-        };
+    let mut args = env::args();
+    let mut arguments = Arguments::new(args.next().unwrap());
 
-        match match analize_file(&mut rom_file) {
-            Ok(f) => f(
-                &mut rom_file,
-                &Path::new(out_path)
-                    .parent()
-                    .unwrap()
-                    .join(&Path::new(out_path).file_stem().unwrap()),
-            ),
-            Err(e) => Err(e),
-        } {
-            Ok(_) => (),
-            Err(e) => return println!("\nError: {}", e),
-        };
-    } else {
-        return print_help();
+    arguments.rom_file = match args.next() {
+        Some(rom_path) => match File::open(&rom_path) {
+            Ok(f) => {
+                arguments.out_path = Some(
+                    PathBuf::from(&rom_path)
+                        .parent()
+                        .unwrap()
+                        .join(PathBuf::from(&rom_path).file_stem().unwrap()),
+                );
+
+                Some(f)
+            }
+            Err(e) => return println!("\nError: cannot open rom file [{}]", e),
+        },
+        None => return print_help(arguments.slf_path),
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-cdl" => {
+                if let Some(cdl_path) = args.next() {
+                    arguments.cdl_file = match File::open(cdl_path) {
+                        Ok(f) => Some(f),
+                        Err(e) => return println!("\nError: cannot open cdl file [{}]", e),
+                    };
+                }
+            }
+
+            "-h" | "--help" => return print_help(arguments.slf_path),
+
+            _ => {}
+        }
+    }
+
+    match match analize_file(arguments.rom_file.as_ref().unwrap()) {
+        Ok(f) => f(arguments),
+        Err(e) => Err(e),
+    } {
+        Ok(_) => (),
+        Err(e) => return println!("\nError: {}", e),
     }
 
     println!("\nProgram terminated successfully :)");
 }
 
-fn analize_file(file: &mut File) -> io::Result<fn(&mut File, &Path) -> io::Result<()>> {
+fn analize_file(mut file: &File) -> io::Result<fn(Arguments) -> io::Result<()>> {
     let header = &mut [0; 0x10];
 
     match file.read(header) {
         Err(e) => Err(io::Error::new(
             e.kind(),
-            format!("Cannot read file's header ({})", e),
+            format!("Cannot read file's header [{}]", e),
         )),
         _ => Ok(()),
     }?;
@@ -56,8 +96,14 @@ fn analize_file(file: &mut File) -> io::Result<fn(&mut File, &Path) -> io::Resul
     }
 }
 
-fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
+fn parse_ines(arguments: Arguments) -> io::Result<()> {
     let header_buffer = &mut [0; 0x10];
+
+    let (out_path, rom_file) = (
+        arguments.out_path.as_ref().unwrap(),
+        &mut arguments.rom_file.as_ref().unwrap(),
+    );
+
     rom_file.read(header_buffer)?;
 
     println!("Found iNES file:\n");
@@ -90,7 +136,7 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
         format!("{:03}", mapper)
     );
     println!(
-        "b{}\tFLAG6 ({} mirroring{}{}{})",
+        "b{}\tFLAG6 [{} mirroring{}{}{}]",
         format!("{:04b}", flag6 & 0x0F),
         if flag6 & 0x1 == 0 {
             "horizontal"
@@ -105,7 +151,7 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
         if flag6 & 0x4 == 0 {
             ""
         } else {
-            ", 512-byte trainer" // TODO: Not supported (See: https://wiki.nesdev.org/w/index.php/NES_2.0#Trainer_Area)
+            ", 512-byte trainer"
         },
         if flag6 & 0x8 == 0 {
             ""
@@ -114,7 +160,7 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
         }
     );
     println!(
-        "b{}\tFLAG7 ({}{}{})",
+        "b{}\tFLAG7 [{}{}{}]",
         format!("{:04b}", flag7 & 0x0F),
         if flag7 & 0x1 == 0 {
             ""
@@ -138,7 +184,7 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
 
     println!("b{:04b}\tFLAG8 PRG RAM size", flag8 & 0xF);
     println!(
-        "b{:01b}\tFLAG9 TV System ({})",
+        "b{:01b}\tFLAG9 TV System [{}]",
         flag9 & 0x1,
         if flag9 & 0x1 == 0 { "NTSC" } else { "PAL" }
     );
@@ -191,7 +237,7 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
 
     for i in 0..*prg_count {
         rom_file.read(prg_buffer)?;
-        File::create(out_path.join(format!("bank{}.prg", i)))?.write(prg_buffer)?;
+        File::create(out_path.join(format!("prg{}.prg", i)))?.write(prg_buffer)?;
     }
     println!("\twritten");
 
@@ -200,16 +246,32 @@ fn parse_ines(rom_file: &mut File, out_path: &Path) -> io::Result<()> {
 
     for i in 0..*chr_count {
         rom_file.read(chr_buffer)?;
-        File::create(out_path.join(format!("bank{}.chr", i)))?.write(chr_buffer)?;
+        File::create(out_path.join(format!("chr{}.chr", i)))?.write(chr_buffer)?;
     }
     println!("\twritten");
+
+    if let Some(mut cdl_file) = arguments.cdl_file {
+        let cdl_prg_buffer = &mut [0; 0x4000];
+        let cdl_chr_buffer = &mut [0; 0x2000];
+        print!("CDL files");
+
+        for i in 0..*prg_count {
+            cdl_file.read(cdl_prg_buffer)?;
+            File::create(out_path.join(format!("prg{}.cdl", i)))?.write(cdl_prg_buffer)?;
+        }
+        for i in 0..*chr_count {
+            cdl_file.read(cdl_chr_buffer)?;
+            File::create(out_path.join(format!("chr{}.cdl", i)))?.write(cdl_chr_buffer)?;
+        }
+        println!("\twritten");
+    }
 
     Ok(())
 }
 
-fn print_help() {
+fn print_help(slf_path: String) {
     println!("Usage:");
-    println!("\t{} rom_file\n", env::args().next().unwrap());
+    println!("\t{} rom_file [cdl_file]\n", slf_path);
     println!("This program breaks down a ROM file into its parts and stores them in individual files.");
-    println!("This process isn't reversible, yet.");
+    println!("Currently supported file format \".nes\"");
 }
